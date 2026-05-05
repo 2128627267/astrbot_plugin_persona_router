@@ -21,29 +21,6 @@
 
 ---
 
-## 🚀 快速安装
-
-### 方式一：直接放置
-
-将插件文件夹放入 AstrBot 的 addons 目录，然后在 WebUI 插件管理中点击「重载插件」。
-```bash
-cp -r astrbot_plugin_persona_router/ /path/to/AstrBot/addons/
-```
-
-### 方式二：WebUI 上传
-
-将插件文件夹打包为 .zip，在 AstrBot WebUI → 插件管理 → 上传插件中上传。
-```bash
-cd /path/to/your/plugin/
-zip -r persona-router.zip astrbot_plugin_persona-router/
-```
-
-### 方式三：GitHub 安装
-
-在 AstrBot WebUI → 插件管理 → 从 GitHub 安装，输入仓库地址 https://github.com/2128627267/astrbot_plugin_persona_router
-
----
-
 ## ⚙️ 配置说明
 
 安装后，在 WebUI 插件配置面板中设置。
