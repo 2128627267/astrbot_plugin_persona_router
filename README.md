@@ -35,7 +35,7 @@ cp -r astrbot_plugin_persona_router/ /path/to/AstrBot/addons/
 将插件文件夹打包为 .zip，在 AstrBot WebUI → 插件管理 → 上传插件中上传。
 ```bash
 cd /path/to/your/plugin/
-zip -r persona-router.zip astrbot_plugin_persona_router/
+zip -r persona-router.zip astrbot_plugin_persona-router/
 ```
 
 ### 方式三：GitHub 安装
