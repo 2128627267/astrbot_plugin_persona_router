@@ -1,0 +1,10 @@
+name: astrbot_plugin_persona-router
+display_name: 动态人格路由
+short_desc: 根据聊天内容自动切换 LLM 人格
+desc: 根据聊天内容自动切换 LLM 人格，支持关键词匹配与唤醒词触发。人格基础数据由 AstrBot 管理，插件仅附加路由元数据。目前仅在aiocqhttp上测试过。
+version: v1.0.0
+author: qf
+repo: https://github.com/2128627267/astrbot_plugin_persona-router
+astrbot_version: ">=4.23.1"
+support_platforms:
+  - aiocqhttp

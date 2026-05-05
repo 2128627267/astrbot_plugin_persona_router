@@ -1,0 +1,137 @@
+{
+  "router_mode": {
+    "description": "路由模式",
+    "type": "string",
+    "hint": "keyword: 纯关键词匹配; trigger_only: 仅唤醒词触发; hybrid: 关键词优先，未命中则尝试唤醒词",
+    "default": "hybrid",
+    "options": ["keyword", "trigger_only", "hybrid"],
+    "labels": ["关键词匹配", "仅唤醒词触发", "混合模式"]
+  },
+  "default_persona_id": {
+    "description": "默认人格",
+    "type": "string",
+    "hint": "当无法匹配到任何规则时使用的人格",
+    "_special": "select_persona"
+  },
+  "cooldown_messages": {
+    "description": "切换冷却消息数",
+    "type": "int",
+    "hint": "切换人格后锁定 N 条消息不重新判断（0=每条都可切换）",
+    "default": 3
+  },
+  "keyword_method": {
+    "description": "关键词匹配策略",
+    "type": "string",
+    "hint": "score: 加权打分取最高; any: 任意命中即触发; all: 全中才触发",
+    "default": "score",
+    "options": ["score", "any", "all"],
+    "labels": ["加权打分（推荐）", "任意命中", "全部命中"]
+  },
+  "min_hits": {
+    "description": "最低命中分数",
+    "type": "int",
+    "hint": "加权打分模式中低于此分视为未命中。建议设为 1",
+    "default": 1
+  },
+  "manual_switch_enabled": {
+    "description": "启用手动切换",
+    "type": "bool",
+    "hint": "允许用户通过 /persona 命令手动切换人格",
+    "default": true
+  },
+  "persona_routing_rules": {
+    "description": "人格路由规则",
+    "type": "template_list",
+    "hint": "为每个人格配置触发词和匹配规则。只需配置需要自动路由的人格，未配置的人格不会被自动匹配（但可通过 /persona switch 手动切换）。",
+    "templates": {
+      "default_rule": {
+        "name": "路由规则模板",
+        "hint": "选择一个已存在的人格，为其配置触发方式",
+        "items": {
+          "persona_id": {
+            "description": "目标人格",
+            "type": "string",
+            "hint": "选择 AstrBot 中已配置的人格。系统提示词等基础信息由此人格设定提供。",
+            "_special": "select_persona"
+          },
+          "wake_words": {
+            "description": "唤醒词",
+            "type": "list",
+            "hint": "消息包含这些词时触发路由判断，多个词任一命中即可。如：[\"喵\", \"猫娘\", \"@小F\"]。留空则仅依赖关键词匹配。"
+          },
+          "wake_mode": {
+            "description": "唤醒词匹配方式",
+            "type": "string",
+            "hint": "contains: 包含即触发; startswith: 以该词开头才触发; regex: 正则匹配",
+            "default": "contains",
+            "options": ["contains", "startswith", "regex"],
+            "labels": ["包含", "开头匹配", "正则"]
+          },
+          "keywords_high": {
+            "description": "高权重关键词",
+            "type": "list",
+            "hint": "命中一个得 3 分（权重可在下方调整）。如：[\"代码\", \"报错\", \"bug\"]"
+          },
+          "keywords_normal": {
+            "description": "普通关键词",
+            "type": "list",
+            "hint": "命中一个得 1 分。如：[\"部署\", \"配置\"]"
+          },
+          "keywords_exclude": {
+            "description": "排除词",
+            "type": "list",
+            "hint": "命中一个扣 2 分，用于降低误匹配。如某人格不希望包含\"喵\"的消息触发，则填 [\"喵\"]"
+          },
+          "switch_notice": {
+            "description": "切换提示语",
+            "type": "string",
+            "hint": "切换到该人格时发送的提示。留空则不发送。支持占位符 {persona_name}。如：「来啦喵~现在是{persona_name}模式！」"
+          },
+          "hint_template": {
+            "description": "AI 提示模板",
+            "type": "text",
+            "hint": "（可选）注入到 system_prompt 末尾的额外上下文，帮助 AI 理解当前场景。如：「用户正在讨论技术问题，请保持简洁专业的回答风格。」留空则不追加。"
+          },
+          "group_enabled": {
+            "description": "群聊中启用",
+            "type": "bool",
+            "hint": "是否在群聊中允许触发此人格",
+            "default": true
+          },
+          "group_require_mention": {
+            "description": "群聊需@",
+            "type": "bool",
+            "hint": "群聊中是否需要 @ 机器人才触发此人格",
+            "default": false
+          },
+          "action": {
+            "description": "特殊行为",
+            "type": "string",
+            "hint": "normal: 正常切换人格回复; block: 匹配后拦截消息不回复",
+            "default": "normal",
+            "options": ["normal", "block"],
+            "labels": ["正常切换", "拦截消息"]
+          }
+        }
+      }
+    }
+  },
+  "keyword_high_weight": {
+    "description": "高权重关键词分值",
+    "type": "int",
+    "hint": "high 级关键词命中一次得几分",
+    "default": 3
+  },
+  "keyword_exclude_penalty": {
+    "description": "排除词扣分值",
+    "type": "int",
+    "hint": "exclude 词命中一次扣几分（填负数）",
+    "default": -2
+  },
+  "global_switch_notice": {
+    "description": "全局切换提示模板",
+    "type": "string",
+    "hint": "当某个人格未单独设置切换提示时，使用此模板。留空则不发送。占位符：{persona_name}、{persona_id}",
+    "default": "🐾 已切换至【{persona_name}】"
+  }
+}
