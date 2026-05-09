@@ -34,12 +34,12 @@
     "default": 1
   },
   "manual_switch_enabled": {
-    "description": "启用手动切换",
-    "type": "bool",
-    "hint": "允许用户通过 /persona 命令手动切换人格",
-    "default": true
-  },
-  "persona_routing_rules": {
+        "description": "启用手动切换",
+        "type": "bool",
+        "hint": "允许用户通过 /persona 命令手动切换人格",
+        "default": true
+    },
+    "persona_routing_rules": {
     "description": "人格路由规则",
     "type": "template_list",
     "hint": "为每个人格配置触发词和匹配规则。只需配置需要自动路由的人格，未配置的人格不会被自动匹配（但可通过 /persona switch 手动切换）。",
