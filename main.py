@@ -14,11 +14,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import filter, AstrMessageEvent, PermissionType
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.message_components import At
+from astrbot.core.agent.tool import FunctionTool, ToolExecResult
+from astrbot.core.agent.run_context import ContextWrapper
+from astrbot.core.agent.message import UserMessageSegment, TextPart
 
 
 # ─────────────────────────────────────────────
@@ -42,6 +45,74 @@ class SessionState:
         self.persona_id = pid
         self.msg_count = 0
         self.switched_at = time.time()
+
+
+# ─────────────────────────────────────────────
+#  人格切换行为（Tool）
+# ─────────────────────────────────────────────
+
+@dataclass
+class GetPersonaListTool(FunctionTool):
+    name: str = "get_persona_list"
+    description: str = "获取可用人格列表"
+    parameters: dict = field(default_factory=lambda: {
+        "type": "object",
+        "properties": {},
+        "required": []
+    })
+
+    async def call(self, context_wrapper: ContextWrapper, **kwargs) -> ToolExecResult:
+        try:
+            from astrbot.core.astr_agent_context import AstrAgentContext
+            ctx = context_wrapper.context
+            all_p = await ctx.persona_manager.get_all_personas()
+            persona_list = [p.persona_id for p in all_p]
+            return ToolExecResult("\n".join(persona_list))
+        except Exception as e:
+            logger.error(f"get_persona_list 失败: {e}")
+            return ToolExecResult(f"获取失败: {e}")
+
+
+@dataclass
+class SwitchPersonaTool(FunctionTool):
+    name: str = "switch_persona"
+    description: str = "切换到指定人格"
+    parameters: dict = field(default_factory=lambda: {
+        "type": "object",
+        "properties": {
+            "persona_id": {
+                "type": "string",
+                "description": "目标人格 ID"
+            }
+        },
+        "required": ["persona_id"]
+    })
+
+    async def call(self, context_wrapper: ContextWrapper, **kwargs) -> ToolExecResult:
+        try:
+            persona_id = kwargs.get("persona_id")
+            if not persona_id:
+                return ToolExecResult("请指定目标人格")
+
+            from astrbot.core.astr_agent_context import AstrAgentContext
+            ctx = context_wrapper.context
+            event = context_wrapper.event
+            umo = event.unified_msg_origin
+
+            # 验证人格存在
+            await ctx.persona_manager.get_persona(persona_id)
+
+            # 执行切换（通过插件实例）
+            plugin = ctx.plugin_manager.get_plugin("persona-router")
+            if plugin and hasattr(plugin, "_do_switch_via_tool"):
+                await plugin._do_switch_via_tool(umo, persona_id, event)
+            
+            return ToolExecResult(f"已切换到人格: {persona_id}")
+        except ValueError:
+            return ToolExecResult(f"人格不存在: {persona_id}")
+        except Exception as e:
+            logger.error(f"switch_persona 失败: {e}")
+            return ToolExecResult(f"切换失败: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -165,7 +236,8 @@ class PersonaRouterPlugin(Star):
 
     async def initialize(self):
         self._build_rules()
-        self._validate_personas()
+        await self._validate_personas()
+        logger.info("初始化人格路由插件，加载规则数: %d", len(self._rules))
 
         default = self.cfg.get("default_persona_id", "default")
         self._sessions = SessionManager(default)
@@ -176,6 +248,13 @@ class PersonaRouterPlugin(Star):
             exclude_p=self.cfg.get("keyword_exclude_penalty", -2),
         )
         self._cleanup = asyncio.create_task(self._periodic_cleanup())
+
+        # 注册人格切换工具
+        self.context.add_llm_tools(
+            GetPersonaListTool(),
+            SwitchPersonaTool(),
+        )
+        logger.info("已注册人格切换工具: get_persona_list, switch_persona")
 
         logger.info(
             f"persona-router 就绪: mode={self.cfg.get('router_mode')}, "
@@ -192,77 +271,110 @@ class PersonaRouterPlugin(Star):
         logger.info("persona-router 已卸载")
 
     # ═══════════════ 核心钩子 ═══════════════
+    # 注意：本钩子不限制平台，router_mode 为 hybrid 时自动适配群聊/私聊。
+    # 如需限制为特定平台（如仅 aiocqhttp），可添加装饰器：
+    # @filter.platform_adapter_type(PlatformAdapterType.AIOCQHTTP)
 
     @filter.on_llm_request()
-    async def on_llm_request(
-        self, event: AstrMessageEvent, req: ProviderRequest
-    ):
+    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+        """核心路由逻辑：分析消息内容，决定是否切换人格"""
+        # 确保引擎已初始化
         if not self._sessions or not self._kw:
             return
-
+        
+        # ── 获取基础信息 ──
         umo = event.unified_msg_origin
-        msg = event.message_str or ""
+        message_text = event.message_str or ""
         if not umo:
+            logger.warning("缺少 unified_msg_origin，跳过路由")
             return
-
-        is_group = bool(getattr(event.message_obj, "group_id", ""))
-        mentioned = self._check_at(event)
-
-        # 1. 手动命令（由指令系统处理 /persona，这里只兜底 /人格）
+        
+        # ── 获取会话详情 ──
+        msg_obj = event.message_obj
+        is_group = bool(getattr(msg_obj, "group_id", ""))
+        is_mentioned = self._check_at(event)
+        
+        # ── 调试日志 ──
+        logger.debug(
+            f"路由请求: session={umo}, msg='{message_text[:30]}...', "
+            f"group={is_group}, mentioned={is_mentioned}"
+        )
+        
+        # ── 步骤1: 检查手动切换命令 ──
         if self.cfg.get("manual_switch_enabled", True):
-            manual = self._parse_manual(msg)
-            if manual == "__LIST__":
+            manual_target = self._parse_manual(message_text)
+            if manual_target:
+                await self._do_switch(umo, manual_target, event, req)
                 return
-            if manual:
-                await self._do_switch(umo, manual, event, req)
-                return
-
-        # 2. 会话状态
+        
+        # ── 步骤2: 获取当前会话状态 ──
         st = self._sessions.get(umo)
-
-        # 3. 冷却
-        cd = self.cfg.get("cooldown_messages", 3)
-        if st.in_cooldown(cd):
+        
+        # ── 步骤3: 冷却期检查 ──
+        cooldown = self.cfg.get("cooldown_messages", 3)
+        if st.in_cooldown(cooldown):
             st.tick()
-            return
-
-        # 4. 路由
+            logger.debug(f"冷却中: {st.msg_count}/{cooldown}")
+            return  # 保持当前人格
+        
+        # ── 步骤4: 路由判断 ──
         mode = self.cfg.get("router_mode", "hybrid")
-        matched = None
-
+        matched: Optional[str] = None
+        
+        # 4a. 关键词匹配（keyword / hybrid 模式）
         if mode in ("keyword", "hybrid"):
-            matched = self._kw.match(msg, self._rules)
-
+            matched = self._kw.match(message_text, self._rules)
+        
+        # 4b. 唤醒词兜底（trigger_only / hybrid 未命中时）
         if not matched and mode in ("trigger_only", "hybrid"):
-            matched = self._match_wake(msg, st.persona_id)
-
+            matched = self._match_wake(message_text, current_pid=st.persona_id)
+        
+        # ── 步骤5: 未匹配 → 保持当前人格 ──
         if not matched:
+            logger.debug("未匹配到任何人格，保持当前人格")
             st.tick()
-            return
-
+            return  # 不要阻止后续处理
+        
+        # ── 步骤6: 已是当前人格 → 无需切换 ──
         if matched == st.persona_id:
+            logger.debug("已是当前人格，无需切换")
             st.tick()
             return
-
-        # 5. 群聊权限
+        
+        # ── 步骤7: 群聊权限检查 ──
         rule = self._rules_map.get(matched, {})
         if is_group:
+            # 1. 检查是否启用群聊
             if not rule.get("group_enabled", True):
+                logger.debug(f"群聊中未启用人格 {matched}，跳过")
                 st.tick()
                 return
-            if rule.get("group_require_mention", False) and not mentioned:
+            
+            # 2. 检查@要求
+            require_mention = rule.get("group_require_mention", False)
+            if require_mention and not is_mentioned:
+                logger.debug(f"需要@但未被@，跳过 {matched}")
                 st.tick()
                 return
-
-        # 6. 拦截
+            
+            # 3. 被@时优先触发（即使不要求@）
+            if not require_mention and is_mentioned:
+                logger.debug(f"未要求@但被@，优先触发 {matched}")
+        
+        # ── 步骤8: 拦截检查 ──
         if rule.get("action") == "block":
-            logger.info(f"拦截: {umo}, persona={matched}")
-            event.stop_event()
+            logger.info(f"消息拦截: umo={umo}, persona={matched}")
+            event.stop_event()  # 阻止 LLM 调用
             st.tick()
             return
-
-        # 7. 切换
+        
+        # ── 步骤9: 执行切换 ──
+        logger.info(
+            f"执行切换: {umo} → {matched} "
+            f"(群聊状态: {is_group}/{'@' if is_mentioned else '未@'})"
+        )
         await self._do_switch(umo, matched, event, req)
+
 
     # ═══════════════ 指令 ═══════════════
 
@@ -270,12 +382,16 @@ class PersonaRouterPlugin(Star):
     def persona(self):
         pass
 
-    @persona.command("switch")
-    async def cmd_switch(self, event: AstrMessageEvent, target: str):
-        """手动切换人格"""
-        # 校验：target 必须在 AstrBot 中存在，不限于 rules
+    @persona.command("switch", alias={"人格"})
+    @filter.permission_type(PermissionType.ADMIN)
+    async def cmd_switch(self, event: AstrMessageEvent, target: Optional[str] = None):
+        """手动切换人格 (需要管理员权限)"""
+        if not target:
+            yield event.plain_result("❌ 请指定要切换的人格 ID。用法：/persona switch <人格ID>")
+            return
+
         try:
-            persona = self.context.persona_manager.get_persona(target)
+            persona = await self.context.persona_manager.get_persona(target)
         except ValueError:
             yield event.plain_result(
                 f"❌ 人格「{target}」不存在。请先在 WebUI「人格设定」中创建。"
@@ -283,24 +399,25 @@ class PersonaRouterPlugin(Star):
             return
 
         umo = event.unified_msg_origin
-        self._sessions.switch(umo, target)
+        name = getattr(persona, "persona_id", target)
         notice = self._rules_map.get(target, {}).get("switch_notice", "") or \
                  self.cfg.get("global_switch_notice", "")
-        name = getattr(persona, "persona_id", target)
         if notice:
             notice = notice.format(persona_name=name, persona_id=target)
 
-        # 持久化
+        # 先持久化，再更新内存状态
         await self._persist_persona(umo, target)
+        self._sessions.switch(umo, target)
 
         if notice:
             yield event.plain_result(notice)
         else:
             yield event.plain_result(f"🐾 已切换至【{name}】")
 
-    @persona.command("list")
+    @persona.command("list", alias={"人格列表"})
+    @filter.permission_type(PermissionType.ADMIN)
     async def cmd_list(self, event: AstrMessageEvent):
-        """列出所有已配置路由规则的人格，以及 AstrBot 中的全部人格"""
+        """列出所有已配置路由规则的人格，以及 AstrBot 中的全部人格 (需要管理员权限)"""
         lines = ["📋 已配置路由规则的人格:"]
         if not self._rules:
             lines.append("  （无）")
@@ -315,7 +432,7 @@ class PersonaRouterPlugin(Star):
         lines.append("📋 AstrBot 中的全部人格:")
 
         try:
-            all_p = self.context.persona_manager.get_all_personas()
+            all_p = await self.context.persona_manager.get_all_personas()
             for p in all_p:
                 has_rule = "✅" if p.persona_id in self._rules_map else "⬜"
                 lines.append(f"  {has_rule} {p.persona_id}")
@@ -326,6 +443,7 @@ class PersonaRouterPlugin(Star):
         lines.append(f"默认人格: {self.cfg.get('default_persona_id', 'default')}")
         lines.append(f"路由模式: {self.cfg.get('router_mode', 'hybrid')}")
         lines.append(f"冷却: {self.cfg.get('cooldown_messages', 3)} 条消息")
+        lines.append(f"人格工具: ✅ get_persona_list, switch_persona")
 
         yield event.plain_result("\n".join(lines))
 
@@ -347,7 +465,7 @@ class PersonaRouterPlugin(Star):
     async def cmd_reload(self, event: AstrMessageEvent):
         """重载路由规则（从 _conf_schema.json 重新读取 template_list）"""
         self._build_rules()
-        self._validate_personas()
+        await self._validate_personas()
         self._persona_cache.clear()
         yield event.plain_result(f"✅ 已重载 {len(self._rules)} 条路由规则")
 
@@ -358,31 +476,29 @@ class PersonaRouterPlugin(Star):
                          req: Optional[ProviderRequest] = None):
         rule = self._rules_map.get(pid, {})
 
-        # A. 持久化 persona_id 到当前对话
+        # A. 获取人格信息（只调用一次，避免重复请求）
+        persona = await self._get_persona(pid)
+        persona_name = getattr(persona, "persona_id", pid) if persona else pid
+
+        # B. 持久化 persona_id 到当前对话（先持久化再更新内存）
         await self._persist_persona(umo, pid)
 
-        # B. 注入 system_prompt + hint_template
-        if req is not None:
-            persona = await self._get_persona(pid)
-            if persona and hasattr(persona, "system_prompt"):
-                sp = persona.system_prompt
-                hint = rule.get("hint_template", "")
-                if hint:
-                    sp = sp.rstrip() + "\n\n" + hint.strip()
-                req.system_prompt = sp
-                logger.debug(f"注入 system_prompt: {pid} ({len(sp)} chars)")
+        # C. 注入 system_prompt + hint_template
+        if req is not None and persona and hasattr(persona, "system_prompt"):
+            sp = persona.system_prompt
+            hint = rule.get("hint_template", "")
+            if hint:
+                sp = sp.rstrip() + "\n\n" + hint.strip()
+            req.system_prompt = sp
+            logger.debug(f"注入 system_prompt: {pid} ({len(sp)} chars)")
 
-        # C. 内存状态
+        # D. 更新内存状态
         self._sessions.switch(umo, pid)
 
-        # D. 切换提示（优先用人格自己的，否则用全局的）
-        notice = rule.get("switch_notice", "")
-        if not notice:
-            notice = self.cfg.get("global_switch_notice", "")
+        # E. 切换提示（优先用人格自己的，否则用全局的）
+        notice = rule.get("switch_notice", "") or self.cfg.get("global_switch_notice", "")
         if notice:
             try:
-                name = (await self._get_persona(pid))
-                persona_name = getattr(name, "persona_id", pid) if name else pid
                 await event.send(notice.format(
                     persona_name=persona_name,
                     persona_id=pid,
@@ -391,6 +507,10 @@ class PersonaRouterPlugin(Star):
                 logger.warning(f"发送切换提示失败: {e}")
 
         logger.info(f"切换人格: {umo} → {pid}")
+
+    async def _do_switch_via_tool(self, umo: str, pid: str, event: AstrMessageEvent):
+        """供 SwitchPersonaTool 调用的简化版切换方法（无需 ProviderRequest）"""
+        await self._do_switch(umo, pid, event, req=None)
 
     async def _persist_persona(self, umo: str, pid: str):
         """将 persona_id 写入当前对话"""
@@ -408,7 +528,7 @@ class PersonaRouterPlugin(Star):
         if pid in self._persona_cache:
             return self._persona_cache[pid]
         try:
-            p = self.context.persona_manager.get_persona(pid)
+            p = await self.context.persona_manager.get_persona(pid)
             if p:
                 self._persona_cache[pid] = p
             return p
@@ -458,11 +578,11 @@ class PersonaRouterPlugin(Star):
 
         logger.debug(f"构建规则完成: {len(self._rules)} 条")
 
-    def _validate_personas(self):
+    async def _validate_personas(self):
         """校验规则中的 persona_id 是否在 AstrBot 中存在"""
         try:
-            existing = {p.persona_id for p in
-                        self.context.persona_manager.get_all_personas()}
+            all_p = await self.context.persona_manager.get_all_personas()
+            existing = {p.persona_id for p in all_p}
         except Exception as e:
             logger.warning(f"无法校验人格: {e}")
             return
@@ -502,25 +622,26 @@ class PersonaRouterPlugin(Star):
         for pfx in ("/人格 ", "/人格"):
             if s.startswith(pfx):
                 t = s[len(pfx):].strip()
-                if not t:
-                    return "__LIST__"
-                # 检查是否存在于已有规则中，或者 AstrBot 中
-                if t in self._rules_map:
+                if t:
                     return t
-                # 也允许切换到未配置路由规则但存在于 AstrBot 的人格
-                return t
         return None
 
     def _check_at(self, event: AstrMessageEvent) -> bool:
         try:
             msgs = event.get_messages()
             sid = event.message_obj.self_id
+            if not sid:
+                return False
+            sid = str(sid)
             for seg in msgs:
                 if isinstance(seg, At):
-                    if str(getattr(seg, "qq", "")) == str(sid):
+                    at_id = str(getattr(seg, "qq", "") or
+                                getattr(seg, "user_id", "") or
+                                getattr(seg, "target", ""))
+                    if at_id and at_id == sid:
                         return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"_check_at 异常: {e}")
         return False
 
     # ═══════════════ 后台 ═══════════════
