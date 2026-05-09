@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from astrbot.api.event import filter, AstrMessageEvent, PermissionType
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.provider import ProviderRequest
@@ -383,7 +383,7 @@ class PersonaRouterPlugin(Star):
         pass
 
     @persona.command("switch", alias={"人格"})
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_switch(self, event: AstrMessageEvent, target: Optional[str] = None):
         """手动切换人格 (需要管理员权限)"""
         if not target:
@@ -415,7 +415,7 @@ class PersonaRouterPlugin(Star):
             yield event.plain_result(f"🐾 已切换至【{name}】")
 
     @persona.command("list", alias={"人格列表"})
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_list(self, event: AstrMessageEvent):
         """列出所有已配置路由规则的人格，以及 AstrBot 中的全部人格 (需要管理员权限)"""
         lines = ["📋 已配置路由规则的人格:"]
